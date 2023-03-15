@@ -1,11 +1,10 @@
 {
-  "name": "ExamplePlugin",
+  "name": "OldSigns",
   "version": "${version}",
-  "description": "Example implementation of a plugin for Lambda.",
+  "description": "implementation of the oldsign exploit as a lambda plugin",
   "url": "https://github.com/lambda-client/ExamplePlugin",
-  "authors": [ "me", "you" ],
+  "authors": [ "EBSmc"],
   "main_class": "com.lambda.ExamplePlugin",
   "min_api_version": "3.2",
-  "mixins": [ "mixins.ExamplePlugin.json" ],
   "required_plugins": []
 }

@@ -1,93 +1,124 @@
 package com.lambda.modules
 
 import com.lambda.ExamplePlugin
-import com.lambda.client.event.SafeClientEvent
-import com.lambda.client.event.events.PlayerAttackEvent
-import com.lambda.client.mixin.extension.syncCurrentPlayItem
+import com.lambda.client.event.events.RenderWorldEvent
 import com.lambda.client.module.Category
 import com.lambda.client.plugin.api.PluginModule
-import com.lambda.client.util.combat.CombatUtils
-import com.lambda.client.util.combat.CombatUtils.equipBestWeapon
-import com.lambda.client.util.items.hotbarSlots
-import com.lambda.client.util.items.swapToSlot
+import com.lambda.client.util.TickTimer
+import com.lambda.client.util.TimeUnit
+import com.lambda.client.util.color.ColorHolder
+import com.lambda.client.util.graphics.ESPRenderer
+import com.lambda.client.util.graphics.GeometryMasks
+import com.lambda.client.util.math.VectorUtils.toBlockPos
+import com.lambda.client.util.math.VectorUtils.toVec3d
+import com.lambda.client.util.threads.defaultScope
 import com.lambda.client.util.threads.safeListener
-import net.minecraft.block.state.IBlockState
-import net.minecraft.enchantment.EnchantmentHelper
-import net.minecraft.entity.EntityLivingBase
-import net.minecraft.init.Enchantments
-import net.minecraftforge.event.entity.player.PlayerInteractEvent
-import net.minecraftforge.fml.common.gameevent.TickEvent
-import org.lwjgl.input.Mouse
+import io.netty.util.internal.ConcurrentSet
+import kotlinx.coroutines.launch
+import net.minecraft.tileentity.TileEntitySign
+import net.minecraft.util.math.AxisAlignedBB
+import net.minecraft.util.math.BlockPos
+import net.minecraft.util.text.ITextComponent
+import net.minecraft.util.text.TextComponentString
+import java.lang.Exception
+import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.function.Consumer
+import java.util.stream.Collectors
+import kotlin.math.roundToInt
 
-/**
- * This is a module. First set properties then settings then add listener.
- * **/
+
 internal object ExampleModule : PluginModule(
-    name = "ExampleModule",
+    name = "OldSigns",
     category = Category.MISC,
-    description = "Example module which automatically switchs to the best tools when mining or attacking",
+    description = "",
     pluginMain = ExamplePlugin
 ) {
-    private val switchBack = setting("Switch Back", true)
-    private val timeout by setting("Timeout", 20, 1..100, 5, { switchBack.value })
-    private val swapWeapon by setting("Switch Weapon", false)
-    private val preferWeapon by setting("Prefer", CombatUtils.PreferWeapon.SWORD)
 
-    private var shouldMoveBack = false
-    private var lastSlot = 0
-    private var lastChange = 0L
+    private val delay by setting("Update Delay MS", 800, 500..10000, 5)
+    private val range by setting("Range", 100, 30..250, 5)
+    private val color by setting("Color", ColorHolder(r = 30, g = 30, b = 30, a = 50), false)
+
+    private var oldSignBlocks: ConcurrentSet<BlockPos> = ConcurrentSet<BlockPos>()
+    private var updateTimer: TickTimer = TickTimer(TimeUnit.MILLISECONDS)
+
+    private val renderer = ESPRenderer();
 
     init {
-        safeListener<PlayerInteractEvent.LeftClickBlock> {
-            if (shouldMoveBack || !switchBack.value) equipBestTool(world.getBlockState(it.pos))
+
+        safeListener<RenderWorldEvent> {
+            if (mc.currentScreen != null) {
+                return@safeListener;
+            }
+            defaultScope.launch {
+                updateOldSignBlocks()
+            }
+
+            renderer.render(true)
         }
+    }
 
-        safeListener<PlayerAttackEvent> {
-            if (swapWeapon && it.entity is EntityLivingBase) equipBestWeapon(preferWeapon)
-        }
 
-        safeListener<TickEvent.ClientTickEvent> {
-            if (mc.currentScreen != null || !switchBack.value) return@safeListener
-
-            val mouse = Mouse.isButtonDown(0)
-            if (mouse && !shouldMoveBack) {
-                lastChange = System.currentTimeMillis()
-                shouldMoveBack = true
-                lastSlot = player.inventory.currentItem
-                playerController.syncCurrentPlayItem()
-            } else if (!mouse && shouldMoveBack && (lastChange + timeout * 10 < System.currentTimeMillis())) {
-                shouldMoveBack = false
-                player.inventory.currentItem = lastSlot
-                playerController.syncCurrentPlayItem()
+    private fun updateOldSignBlocks() {
+        renderer.aFilled = 30
+        renderer.aOutline = 30
+        oldSignBlocks.clear()
+        for (pos in getBlocksInRadius(range)!!) {
+            if (isOldSignText(pos)) {
+                val side = GeometryMasks.Quad.ALL
+                renderer.add(Triple(AxisAlignedBB(pos), color, side))
             }
         }
     }
 
-    private fun SafeClientEvent.equipBestTool(blockState: IBlockState) {
-        player.hotbarSlots.maxByOrNull {
-            val stack = it.stack
-            if (stack.isEmpty) {
-                0.0f
-            } else {
-                var speed = stack.getDestroySpeed(blockState)
+    private fun isOldSignText(pos: BlockPos?): Boolean {
+        // Explanation: Old signs on 2b2t (pre-2015 <1.9 ?) have older style NBT text tags.
+        // we can tell them apart by checking if there are siblings in the tag. Old signs won't have siblings.
+        val sign: TileEntitySign?
+        if (mc.player.world.getTileEntity(pos) is TileEntitySign) {
+            sign = mc.player.world.getTileEntity(pos) as TileEntitySign?
+            assert(sign != null)
+            val signTextComponents = Arrays.stream(sign!!.signText).filter { component: ITextComponent? -> component is TextComponentString }
+                .map { component: ITextComponent -> component as TextComponentString }
+                .collect(Collectors.toList())
+            val empty = AtomicBoolean(false)
 
-                if (speed > 1.0f) {
-                    val efficiency = EnchantmentHelper.getEnchantmentLevel(Enchantments.EFFICIENCY, stack)
-                    if (efficiency > 0) {
-                        speed += efficiency * efficiency + 1.0f
-                    }
+            //avoid blank signs
+            signTextComponents.forEach(Consumer { t: TextComponentString ->
+                if (t.text.isEmpty()) {
+                    empty.set(true)
                 }
-
-                speed
-            }
-        }?.let {
-            swapToSlot(it)
+            })
+            return if (empty.get()) {
+                false
+            } else signTextComponents.stream()
+                .allMatch { component: TextComponentString -> component.siblings.isEmpty() }
         }
+        return false
     }
 
-    init {
-        switchBack.valueListeners.add { _, it ->
-            if (!it) shouldMoveBack = false
+
+    private fun getBlocksInRadius(range: Int): List<BlockPos>? {
+        val posses: MutableList<BlockPos> = ArrayList()
+        val xRange = range.toDouble().roundToInt().toFloat()
+        val yRange = range.toDouble().roundToInt().toFloat()
+        val zRange = range.toDouble().roundToInt().toFloat()
+        var x = -xRange
+        while (x <= xRange) {
+            var y = -yRange
+            while (y <= yRange) {
+                var z = -zRange
+                while (z <= zRange) {
+                    val position: BlockPos = mc.player.position.toVec3d().add(x.toDouble(), y.toDouble(), z.toDouble()).toBlockPos()
+                    if (mc.player.getDistance(position.x + 0.5, (position.y + 1).toDouble(), position.z + 0.5) <= range) {
+                        posses.add(position)
+                    }
+                    z++
+                }
+                y++
+            }
+            x++
         }
+        return posses
     }
 }
